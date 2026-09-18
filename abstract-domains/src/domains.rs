@@ -1531,18 +1531,26 @@ abstract_domain!(d32, u32, 32u32, 0xFFFF_FFFFu32);
 abstract_domain!(d64, u64, 64u32, 0xFFFF_FFFF_FFFF_FFFFu64);
 // d128 disabled: u128 bitvector proofs exceed Z3 capacity
 // abstract_domain!(d128, u128, 128u32, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128);
+
 use vstd::prelude::*;
 
 verus! {
 
+/// Sign-agnostic wrapped interval for 32-bit machine integers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WrappedU32 {
+    /// Canonical empty set (no concrete values).
     Bottom,
+    /// Canonical full set (all u32 values [0, u32::MAX]).
     Top,
+    /// Canonical arc from `lo` clockwise to `hi`.
+    /// - If lo <= hi: standard contiguous range [lo, hi].
+    /// - If lo > hi: wraps around 0 (i.e., [lo, u32::MAX] ∪ [0, hi]).
     Arc { lo: u32, hi: u32 },
 }
 
 impl WrappedU32 {
+    /// Canonical form invariant.
     pub closed spec fn wf(self) -> bool {
         match self {
             WrappedU32::Bottom => true,
@@ -1551,6 +1559,7 @@ impl WrappedU32 {
         }
     }
 
+    /// Membership predicate (concretization): mathematical spec.
     pub open spec fn has(self, x: u32) -> bool {
         match self {
             WrappedU32::Bottom => false,
@@ -1562,6 +1571,44 @@ impl WrappedU32 {
                     x >= lo || x <= hi
                 }
             }
+        }
+    }
+
+    /// Executable membership check that provably matches the mathematical `has` spec.
+    pub fn contains(&self, x: u32) -> (res: bool)
+        ensures res == self.has(x)
+    {
+        match *self {
+            WrappedU32::Bottom => false,
+            WrappedU32::Top => true,
+            WrappedU32::Arc { lo, hi } => {
+                if lo <= hi {
+                    lo <= x && x <= hi
+                } else {
+                    x >= lo || x <= hi
+                }
+            }
+        }
+    }
+
+    /// Constructor for a constant / singleton value.
+    pub open spec fn constant(val: u32) -> Self {
+        WrappedU32::Arc { lo: val, hi: val }
+    }
+
+    /// Check if interval represents an empty set.
+    pub open spec fn is_bottom(self) -> bool {
+        match self {
+            WrappedU32::Bottom => true,
+            _ => false,
+        }
+    }
+
+    /// Check if interval represents the full universe.
+    pub open spec fn is_top(self) -> bool {
+        match self {
+            WrappedU32::Top => true,
+            _ => false,
         }
     }
 }
