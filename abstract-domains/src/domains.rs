@@ -1531,3 +1531,39 @@ abstract_domain!(d32, u32, 32u32, 0xFFFF_FFFFu32);
 abstract_domain!(d64, u64, 64u32, 0xFFFF_FFFF_FFFF_FFFFu64);
 // d128 disabled: u128 bitvector proofs exceed Z3 capacity
 // abstract_domain!(d128, u128, 128u32, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128);
+use vstd::prelude::*;
+
+verus! {
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WrappedU32 {
+    Bottom,
+    Top,
+    Arc { lo: u32, hi: u32 },
+}
+
+impl WrappedU32 {
+    pub closed spec fn wf(self) -> bool {
+        match self {
+            WrappedU32::Bottom => true,
+            WrappedU32::Top => true,
+            WrappedU32::Arc { lo, hi } => true,
+        }
+    }
+
+    pub open spec fn has(self, x: u32) -> bool {
+        match self {
+            WrappedU32::Bottom => false,
+            WrappedU32::Top => true,
+            WrappedU32::Arc { lo, hi } => {
+                if lo <= hi {
+                    lo <= x && x <= hi
+                } else {
+                    x >= lo || x <= hi
+                }
+            }
+        }
+    }
+}
+
+} // verus!
