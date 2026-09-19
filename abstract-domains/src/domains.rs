@@ -1536,81 +1536,86 @@ use vstd::prelude::*;
 
 verus! {
 
-/// Sign-agnostic wrapped interval for 32-bit machine integers.
+/// Sign-agnostic wrapped interval parameterized by the integer type.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum WrappedU32 {
+pub enum Wrapped<T> {
     /// Canonical empty set (no concrete values).
     Bottom,
-    /// Canonical full set (all u32 values [0, u32::MAX]).
+    /// Canonical full set (all values for the type).
     Top,
     /// Canonical arc from `lo` clockwise to `hi`.
-    /// - If lo <= hi: standard contiguous range [lo, hi].
-    /// - If lo > hi: wraps around 0 (i.e., [lo, u32::MAX] ∪ [0, hi]).
-    Arc { lo: u32, hi: u32 },
+    Arc { lo: T, hi: T },
 }
 
-impl WrappedU32 {
-    /// Canonical form invariant.
-    pub closed spec fn wf(self) -> bool {
-        match self {
-            WrappedU32::Bottom => true,
-            WrappedU32::Top => true,
-            WrappedU32::Arc { lo, hi } => true,
-        }
-    }
+macro_rules! impl_wrapped_domain {
+    ($ty:ty) => {
+        impl Wrapped<$ty> {
+            /// Membership predicate (concretization): mathematical spec.
+            pub open spec fn has(self, x: $ty) -> bool {
+                match self {
+                    Wrapped::Bottom => false,
+                    Wrapped::Top => true,
+                    Wrapped::Arc { lo, hi } => {
+                        if lo <= hi {
+                            lo <= x && x <= hi
+                        } else {
+                            x >= lo || x <= hi
+                        }
+                    }
+                }
+            }
 
-    /// Membership predicate (concretization): mathematical spec.
-    pub open spec fn has(self, x: u32) -> bool {
-        match self {
-            WrappedU32::Bottom => false,
-            WrappedU32::Top => true,
-            WrappedU32::Arc { lo, hi } => {
-                if lo <= hi {
-                    lo <= x && x <= hi
-                } else {
-                    x >= lo || x <= hi
+            /// Executable membership check that provably matches the mathematical `has` spec.
+            pub fn contains(&self, x: $ty) -> (res: bool)
+                ensures res == self.has(x)
+            {
+                match *self {
+                    Wrapped::Bottom => false,
+                    Wrapped::Top => true,
+                    Wrapped::Arc { lo, hi } => {
+                        if lo <= hi {
+                            lo <= x && x <= hi
+                        } else {
+                            x >= lo || x <= hi
+                        }
+                    }
+                }
+            }
+
+            /// Constructor for a constant / singleton value.
+            pub open spec fn constant(val: $ty) -> Self {
+                Wrapped::Arc { lo: val, hi: val }
+            }
+
+            /// Check if interval represents an empty set.
+            pub open spec fn is_bottom(self) -> bool {
+                match self {
+                    Wrapped::Bottom => true,
+                    _ => false,
+                }
+            }
+
+            /// Check if interval represents the full universe.
+            pub open spec fn is_top(self) -> bool {
+                match self {
+                    Wrapped::Top => true,
+                    _ => false,
                 }
             }
         }
     }
-
-    /// Executable membership check that provably matches the mathematical `has` spec.
-    pub fn contains(&self, x: u32) -> (res: bool)
-        ensures res == self.has(x)
-    {
-        match *self {
-            WrappedU32::Bottom => false,
-            WrappedU32::Top => true,
-            WrappedU32::Arc { lo, hi } => {
-                if lo <= hi {
-                    lo <= x && x <= hi
-                } else {
-                    x >= lo || x <= hi
-                }
-            }
-        }
-    }
-
-    /// Constructor for a constant / singleton value.
-    pub open spec fn constant(val: u32) -> Self {
-        WrappedU32::Arc { lo: val, hi: val }
-    }
-
-    /// Check if interval represents an empty set.
-    pub open spec fn is_bottom(self) -> bool {
-        match self {
-            WrappedU32::Bottom => true,
-            _ => false,
-        }
-    }
-
-    /// Check if interval represents the full universe.
-    pub open spec fn is_top(self) -> bool {
-        match self {
-            WrappedU32::Top => true,
-            _ => false,
-        }
-    }
 }
+
+// Generate implementations for all requested primitive integer types
+impl_wrapped_domain!(u8);
+impl_wrapped_domain!(u16);
+impl_wrapped_domain!(u32);
+impl_wrapped_domain!(u64);
+impl_wrapped_domain!(u128);
+impl_wrapped_domain!(i8);
+impl_wrapped_domain!(i16);
+impl_wrapped_domain!(i32);
+impl_wrapped_domain!(i64);
+impl_wrapped_domain!(i128);
 
 } // verus!
