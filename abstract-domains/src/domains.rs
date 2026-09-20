@@ -1582,6 +1582,27 @@ macro_rules! impl_wrapped_domain {
                 }
             }
 
+            /// Normalizes the representation by converting full-circle arcs to Top.
+            pub fn normalize(self) -> (res: Self)
+                ensures
+                    // This mathematically proves to Verus that the normalized 
+                    // result contains the exact same elements as the original.
+                    forall|x: $ty| res.has(x) == self.has(x)
+            {
+                match self {
+                    Wrapped::Arc { lo, hi } => {
+                        // A full circle occurs when lo is exactly one step ahead of hi
+                        // (using wrapping_add to safely handle the max-to-min boundary)
+                        if lo == hi.wrapping_add(1) {
+                            Wrapped::Top
+                        } else {
+                            self
+                        }
+                    },
+                    _ => self,
+                }
+            }
+
             /// Constructor for a constant / singleton value.
             pub open spec fn constant(val: $ty) -> Self {
                 Wrapped::Arc { lo: val, hi: val }
