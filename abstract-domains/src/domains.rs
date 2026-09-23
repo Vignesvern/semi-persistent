@@ -1533,6 +1533,7 @@ abstract_domain!(d64, u64, 64u32, 0xFFFF_FFFF_FFFF_FFFFu64);
 // abstract_domain!(d128, u128, 128u32, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128);
 
 use vstd::prelude::*;
+use core::marker::PhantomData;
 
 verus! {
 
@@ -1564,6 +1565,30 @@ pub enum Wrapped<T> {
 
 // Explicit Clone implementation to satisfy Verus verification contracts
 impl<T: Copy> Clone for Wrapped<T> {
+    fn clone(&self) -> (res: Self)
+        ensures res == self
+    {
+        *self
+    }
+}
+
+/// The Sign domain parameterized by integer type to support all primitive widths.
+/// Guaranteed to be non-empty (uses AbstractValue wrapper for unreachability).
+#[derive(Copy, PartialEq, Eq)]
+pub enum Sign<T> {
+    Zero,
+    Pos,
+    Neg,
+    NonNeg,
+    NonPos,
+    NonZero,
+    Top,
+    #[doc(hidden)]
+    _Marker(PhantomData<T>),
+}
+
+// Explicit Clone implementation to satisfy Verus verification contracts
+impl<T: Copy> Clone for Sign<T> {
     fn clone(&self) -> (res: Self)
         ensures res == self
     {
@@ -1638,6 +1663,67 @@ macro_rules! impl_wrapped_domain {
                         _ => false,
                     }
                 }
+
+                /// Intersection (meet) of two wrapped domains.
+                pub fn meet(&self, other: &Self) -> AbstractValue<Self> {
+                    if self == other {
+                        return AbstractValue::NonBot(self.clone());
+                    }
+                    match (self, other) {
+                        (Wrapped::Top, x) | (x, Wrapped::Top) => AbstractValue::NonBot(x.clone()),
+                        (Wrapped::Arc { lo: l1, hi: h1 }, Wrapped::Arc { lo: l2, hi: h2 }) => {
+                            let self_has_l2 = self.contains(*l2);
+                            let self_has_h2 = self.contains(*h2);
+                            let other_has_l1 = other.contains(*l1);
+                            let other_has_h1 = other.contains(*h1);
+
+                            if self_has_l2 && self_has_h2 && other_has_l1 && other_has_h1 {
+                                // Two-arc split (both arcs contain each other's endpoints)
+                                // Returning `self` is a deterministic, sound over-approximation.
+                                AbstractValue::NonBot(self.clone())
+                            } else if self_has_l2 && other_has_h1 {
+                                AbstractValue::NonBot(Wrapped::Arc { lo: *l2, hi: *h1 }.normalize())
+                            } else if other_has_l1 && self_has_h2 {
+                                AbstractValue::NonBot(Wrapped::Arc { lo: *l1, hi: *h2 }.normalize())
+                            } else if self_has_l2 && self_has_h2 {
+                                AbstractValue::NonBot(other.clone())
+                            } else if other_has_l1 && other_has_h1 {
+                                AbstractValue::NonBot(self.clone())
+                            } else {
+                                // Completely disjoint
+                                AbstractValue::Bot
+                            }
+                        }
+                    }
+                }
+
+                /// Union (join) of two wrapped domains.
+                pub fn join(&self, other: &Self) -> Self {
+                    if self == other {
+                        return self.clone();
+                    }
+                    match (self, other) {
+                        (Wrapped::Top, _) | (_, Wrapped::Top) => Wrapped::Top,
+                        (Wrapped::Arc { lo: l1, hi: h1 }, Wrapped::Arc { lo: l2, hi: h2 }) => {
+                            let self_has_l2 = self.contains(*l2);
+                            let self_has_h2 = self.contains(*h2);
+                            let other_has_l1 = other.contains(*l1);
+                            let other_has_h1 = other.contains(*h1);
+
+                            if (self_has_l2 && self_has_h2) || (other_has_l1 && other_has_h1) {
+                                // One completely contains the other
+                                if self_has_l2 { self.clone() } else { other.clone() }
+                            } else if self_has_l2 {
+                                Wrapped::Arc { lo: *l1, hi: *h2 }.normalize()
+                            } else if other_has_l1 {
+                                Wrapped::Arc { lo: *l2, hi: *h1 }.normalize()
+                            } else {
+                                // Disjoint arcs: conservatively return Top to contain both arcs soundly.
+                                Wrapped::Top
+                            }
+                        }
+                    }
+                }
             }
         } // end inner verus!
     }
@@ -1655,35 +1741,6 @@ impl_wrapped_domain!(i32);
 impl_wrapped_domain!(i64);
 impl_wrapped_domain!(i128);
 
-use core::marker::PhantomData;
-
-verus! {
-
-/// The Sign domain parameterized by integer type to support all primitive widths.
-/// Guaranteed to be non-empty (uses AbstractValue wrapper for unreachability).
-#[derive(Copy, PartialEq, Eq)]
-pub enum Sign<T> {
-    Zero,
-    Pos,
-    Neg,
-    NonNeg,
-    NonPos,
-    NonZero,
-    Top,
-    #[doc(hidden)]
-    _Marker(PhantomData<T>),
-}
-
-// Explicit Clone implementation to satisfy Verus verification contracts
-impl<T: Copy> Clone for Sign<T> {
-    fn clone(&self) -> (res: Self)
-        ensures res == self
-    {
-        *self
-    }
-}
-
-} // end verus!
 
 macro_rules! impl_sign_domain {
     ($ty:ty) => {
