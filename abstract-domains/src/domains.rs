@@ -1654,3 +1654,135 @@ impl_wrapped_domain!(i16);
 impl_wrapped_domain!(i32);
 impl_wrapped_domain!(i64);
 impl_wrapped_domain!(i128);
+
+use core::marker::PhantomData;
+
+verus! {
+
+/// The Sign domain parameterized by integer type to support all primitive widths.
+/// Guaranteed to be non-empty (uses AbstractValue wrapper for unreachability).
+#[derive(Copy, PartialEq, Eq)]
+pub enum Sign<T> {
+    Zero,
+    Pos,
+    Neg,
+    NonNeg,
+    NonPos,
+    NonZero,
+    Top,
+    #[doc(hidden)]
+    _Marker(PhantomData<T>),
+}
+
+// Explicit Clone implementation to satisfy Verus verification contracts
+impl<T: Copy> Clone for Sign<T> {
+    fn clone(&self) -> (res: Self)
+        ensures res == self
+    {
+        *self
+    }
+}
+
+} // end verus!
+
+macro_rules! impl_sign_domain {
+    ($ty:ty) => {
+        verus! {
+            impl Sign<$ty> {
+                /// Concretization: mathematical specification of what values the sign represents.
+                pub open spec fn has(self, x: $ty) -> bool {
+                    match self {
+                        Sign::Zero => x == 0,
+                        Sign::Pos => x > 0,
+                        Sign::Neg => x < 0,
+                        Sign::NonNeg => x >= 0,
+                        Sign::NonPos => x <= 0,
+                        Sign::NonZero => x != 0,
+                        Sign::Top => true,
+                        Sign::_Marker(_) => false,
+                    }
+                }
+
+                /// Executable membership check.
+                pub fn contains(&self, x: $ty) -> (res: bool)
+                    ensures res == self.has(x)
+                {
+                    match *self {
+                        Sign::Zero => x == 0,
+                        Sign::Pos => x > 0,
+                        Sign::Neg => x < 0,
+                        Sign::NonNeg => x >= 0,
+                        Sign::NonPos => x <= 0,
+                        Sign::NonZero => x != 0,
+                        Sign::Top => true,
+                        Sign::_Marker(_) => false,
+                    }
+                }
+
+                /// Intersection (meet) of two sign domains.
+                pub fn meet(self, other: Self) -> AbstractValue<Self> {
+                    if self == other {
+                        return AbstractValue::NonBot(self);
+                    }
+                    match (self, other) {
+                        (Sign::Top, x) | (x, Sign::Top) => AbstractValue::NonBot(x),
+                        
+                        (Sign::Zero, Sign::NonNeg) | (Sign::NonNeg, Sign::Zero) => AbstractValue::NonBot(Sign::Zero),
+                        (Sign::Zero, Sign::NonPos) | (Sign::NonPos, Sign::Zero) => AbstractValue::NonBot(Sign::Zero),
+                        
+                        (Sign::Pos, Sign::NonNeg) | (Sign::NonNeg, Sign::Pos) => AbstractValue::NonBot(Sign::Pos),
+                        (Sign::Pos, Sign::NonZero) | (Sign::NonZero, Sign::Pos) => AbstractValue::NonBot(Sign::Pos),
+                        
+                        (Sign::Neg, Sign::NonPos) | (Sign::NonPos, Sign::Neg) => AbstractValue::NonBot(Sign::Neg),
+                        (Sign::Neg, Sign::NonZero) | (Sign::NonZero, Sign::Neg) => AbstractValue::NonBot(Sign::Neg),
+                        
+                        (Sign::NonNeg, Sign::NonPos) | (Sign::NonPos, Sign::NonNeg) => AbstractValue::NonBot(Sign::Zero),
+                        (Sign::NonNeg, Sign::NonZero) | (Sign::NonZero, Sign::NonNeg) => AbstractValue::NonBot(Sign::Pos),
+                        (Sign::NonPos, Sign::NonZero) | (Sign::NonZero, Sign::NonPos) => AbstractValue::NonBot(Sign::Neg),
+                        
+                        // All other conflicting combinations yield Bottom (empty set)
+                        _ => AbstractValue::Bot,
+                    }
+                }
+
+                /// Union (join) of two sign domains.
+                pub fn join(self, other: Self) -> Self {
+                    if self == other {
+                        return self;
+                    }
+                    match (self, other) {
+                        (Sign::Top, _) | (_, Sign::Top) => Sign::Top,
+                        
+                        (Sign::Zero, Sign::Pos) | (Sign::Pos, Sign::Zero) => Sign::NonNeg,
+                        (Sign::Zero, Sign::Neg) | (Sign::Neg, Sign::Zero) => Sign::NonPos,
+                        (Sign::Zero, Sign::NonNeg) | (Sign::NonNeg, Sign::Zero) => Sign::NonNeg,
+                        (Sign::Zero, Sign::NonPos) | (Sign::NonPos, Sign::Zero) => Sign::NonPos,
+                        (Sign::Zero, Sign::NonZero) | (Sign::NonZero, Sign::Zero) => Sign::Top,
+
+                        (Sign::Pos, Sign::Neg) | (Sign::Neg, Sign::Pos) => Sign::NonZero,
+                        (Sign::Pos, Sign::NonNeg) | (Sign::NonNeg, Sign::Pos) => Sign::NonNeg,
+                        (Sign::Pos, Sign::NonPos) | (Sign::NonPos, Sign::Pos) => Sign::Top,
+                        (Sign::Pos, Sign::NonZero) | (Sign::NonZero, Sign::Pos) => Sign::NonZero,
+
+                        (Sign::Neg, Sign::NonNeg) | (Sign::NonNeg, Sign::Neg) => Sign::Top,
+                        (Sign::Neg, Sign::NonPos) | (Sign::NonPos, Sign::Neg) => Sign::NonPos,
+                        (Sign::Neg, Sign::NonZero) | (Sign::NonZero, Sign::Neg) => Sign::NonZero,
+
+                        (Sign::NonNeg, Sign::NonPos) | (Sign::NonPos, Sign::NonNeg) => Sign::Top,
+                        (Sign::NonNeg, Sign::NonZero) | (Sign::NonZero, Sign::NonNeg) => Sign::Top,
+                        (Sign::NonPos, Sign::NonZero) | (Sign::NonZero, Sign::NonPos) => Sign::Top,
+                        
+                        _ => Sign::Top,
+                    }
+                }
+            }
+        } // end inner verus!
+    }
+}
+
+// Generate implementations for signed integer types
+impl_sign_domain!(i8);
+impl_sign_domain!(i16);
+impl_sign_domain!(i32);
+impl_sign_domain!(i64);
+impl_sign_domain!(i128);
