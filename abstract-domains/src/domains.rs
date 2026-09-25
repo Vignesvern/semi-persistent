@@ -1533,6 +1533,7 @@ abstract_domain!(d64, u64, 64u32, 0xFFFF_FFFF_FFFF_FFFFu64);
 // abstract_domain!(d128, u128, 128u32, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128);
 
 use vstd::prelude::*;
+use core::marker::PhantomData;
 
 verus! {
 
@@ -1564,6 +1565,30 @@ pub enum Wrapped<T> {
 
 // Explicit Clone implementation to satisfy Verus verification contracts
 impl<T: Copy> Clone for Wrapped<T> {
+    fn clone(&self) -> (res: Self)
+        ensures res == self
+    {
+        *self
+    }
+}
+
+/// The Sign domain parameterized by integer type to support all primitive widths.
+/// Guaranteed to be non-empty (uses AbstractValue wrapper for unreachability).
+#[derive(Copy, PartialEq, Eq)]
+pub enum Sign<T> {
+    Zero,
+    Pos,
+    Neg,
+    NonNeg,
+    NonPos,
+    NonZero,
+    /// Top state holds the PhantomData to satisfy the compiler without creating
+    /// an invalid/empty 8th enum representation.
+    Top(PhantomData<T>),
+}
+
+// Explicit Clone implementation to satisfy Verus verification contracts
+impl<T: Copy> Clone for Sign<T> {
     fn clone(&self) -> (res: Self)
         ensures res == self
     {
@@ -1655,36 +1680,6 @@ impl_wrapped_domain!(i32);
 impl_wrapped_domain!(i64);
 impl_wrapped_domain!(i128);
 
-use core::marker::PhantomData;
-
-verus! {
-
-/// The Sign domain parameterized by integer type to support all primitive widths.
-/// Guaranteed to be non-empty (uses AbstractValue wrapper for unreachability).
-#[derive(Copy, PartialEq, Eq)]
-pub enum Sign<T> {
-    Zero,
-    Pos,
-    Neg,
-    NonNeg,
-    NonPos,
-    NonZero,
-    Top,
-    #[doc(hidden)]
-    _Marker(PhantomData<T>),
-}
-
-// Explicit Clone implementation to satisfy Verus verification contracts
-impl<T: Copy> Clone for Sign<T> {
-    fn clone(&self) -> (res: Self)
-        ensures res == self
-    {
-        *self
-    }
-}
-
-} // end verus!
-
 macro_rules! impl_sign_domain {
     ($ty:ty) => {
         verus! {
@@ -1698,8 +1693,7 @@ macro_rules! impl_sign_domain {
                         Sign::NonNeg => x >= 0,
                         Sign::NonPos => x <= 0,
                         Sign::NonZero => x != 0,
-                        Sign::Top => true,
-                        Sign::_Marker(_) => false,
+                        Sign::Top(_) => true,
                     }
                 }
 
@@ -1714,8 +1708,24 @@ macro_rules! impl_sign_domain {
                         Sign::NonNeg => x >= 0,
                         Sign::NonPos => x <= 0,
                         Sign::NonZero => x != 0,
-                        Sign::Top => true,
-                        Sign::_Marker(_) => false,
+                        Sign::Top(_) => true,
+                    }
+                }
+
+                /// Refinement ordering: returns true if `self` is as precise or more precise than `other`.
+                pub fn refines(&self, other: &Self) -> bool {
+                    if self == other {
+                        return true;
+                    }
+                    match (*self, *other) {
+                        (_, Sign::Top(_)) => true,
+                        (Sign::Zero, Sign::NonNeg) => true,
+                        (Sign::Zero, Sign::NonPos) => true,
+                        (Sign::Pos, Sign::NonNeg) => true,
+                        (Sign::Pos, Sign::NonZero) => true,
+                        (Sign::Neg, Sign::NonPos) => true,
+                        (Sign::Neg, Sign::NonZero) => true,
+                        _ => false,
                     }
                 }
 
@@ -1725,7 +1735,7 @@ macro_rules! impl_sign_domain {
                         return AbstractValue::NonBot(self);
                     }
                     match (self, other) {
-                        (Sign::Top, x) | (x, Sign::Top) => AbstractValue::NonBot(x),
+                        (Sign::Top(_), x) | (x, Sign::Top(_)) => AbstractValue::NonBot(x),
                         
                         (Sign::Zero, Sign::NonNeg) | (Sign::NonNeg, Sign::Zero) => AbstractValue::NonBot(Sign::Zero),
                         (Sign::Zero, Sign::NonPos) | (Sign::NonPos, Sign::Zero) => AbstractValue::NonBot(Sign::Zero),
@@ -1751,28 +1761,28 @@ macro_rules! impl_sign_domain {
                         return self;
                     }
                     match (self, other) {
-                        (Sign::Top, _) | (_, Sign::Top) => Sign::Top,
+                        (Sign::Top(_), _) | (_, Sign::Top(_)) => Sign::Top(PhantomData),
                         
                         (Sign::Zero, Sign::Pos) | (Sign::Pos, Sign::Zero) => Sign::NonNeg,
                         (Sign::Zero, Sign::Neg) | (Sign::Neg, Sign::Zero) => Sign::NonPos,
                         (Sign::Zero, Sign::NonNeg) | (Sign::NonNeg, Sign::Zero) => Sign::NonNeg,
                         (Sign::Zero, Sign::NonPos) | (Sign::NonPos, Sign::Zero) => Sign::NonPos,
-                        (Sign::Zero, Sign::NonZero) | (Sign::NonZero, Sign::Zero) => Sign::Top,
+                        (Sign::Zero, Sign::NonZero) | (Sign::NonZero, Sign::Zero) => Sign::Top(PhantomData),
 
                         (Sign::Pos, Sign::Neg) | (Sign::Neg, Sign::Pos) => Sign::NonZero,
                         (Sign::Pos, Sign::NonNeg) | (Sign::NonNeg, Sign::Pos) => Sign::NonNeg,
-                        (Sign::Pos, Sign::NonPos) | (Sign::NonPos, Sign::Pos) => Sign::Top,
+                        (Sign::Pos, Sign::NonPos) | (Sign::NonPos, Sign::Pos) => Sign::Top(PhantomData),
                         (Sign::Pos, Sign::NonZero) | (Sign::NonZero, Sign::Pos) => Sign::NonZero,
 
-                        (Sign::Neg, Sign::NonNeg) | (Sign::NonNeg, Sign::Neg) => Sign::Top,
+                        (Sign::Neg, Sign::NonNeg) | (Sign::NonNeg, Sign::Neg) => Sign::Top(PhantomData),
                         (Sign::Neg, Sign::NonPos) | (Sign::NonPos, Sign::Neg) => Sign::NonPos,
                         (Sign::Neg, Sign::NonZero) | (Sign::NonZero, Sign::Neg) => Sign::NonZero,
 
-                        (Sign::NonNeg, Sign::NonPos) | (Sign::NonPos, Sign::NonNeg) => Sign::Top,
-                        (Sign::NonNeg, Sign::NonZero) | (Sign::NonZero, Sign::NonNeg) => Sign::Top,
-                        (Sign::NonPos, Sign::NonZero) | (Sign::NonZero, Sign::NonPos) => Sign::Top,
+                        (Sign::NonNeg, Sign::NonPos) | (Sign::NonPos, Sign::NonNeg) => Sign::Top(PhantomData),
+                        (Sign::NonNeg, Sign::NonZero) | (Sign::NonZero, Sign::NonNeg) => Sign::Top(PhantomData),
+                        (Sign::NonPos, Sign::NonZero) | (Sign::NonZero, Sign::NonPos) => Sign::Top(PhantomData),
                         
-                        _ => Sign::Top,
+                        _ => Sign::Top(PhantomData),
                     }
                 }
             }
