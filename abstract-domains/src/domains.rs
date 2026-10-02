@@ -1531,3 +1531,390 @@ abstract_domain!(d32, u32, 32u32, 0xFFFF_FFFFu32);
 abstract_domain!(d64, u64, 64u32, 0xFFFF_FFFF_FFFF_FFFFu64);
 // d128 disabled: u128 bitvector proofs exceed Z3 capacity
 // abstract_domain!(d128, u128, 128u32, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128);
+
+use vstd::prelude::*;
+use core::marker::PhantomData;
+
+verus! {
+
+/// Global wrapper to canonically represent empty sets (unreachability) across all domains.
+#[derive(Copy, PartialEq, Eq)]
+pub enum AbstractValue<D> {
+    Bot,
+    NonBot(D),
+}
+
+// Explicit Clone implementation to satisfy Verus verification contracts
+impl<D: Copy> Clone for AbstractValue<D> {
+    fn clone(&self) -> (res: Self)
+        ensures res == self
+    {
+        *self
+    }
+}
+
+/// Sign-agnostic wrapped interval parameterized by the integer type.
+/// Guaranteed to be non-empty. Emptiness is now handled by `AbstractValue`.
+#[derive(Copy, PartialEq, Eq)]
+pub enum Wrapped<T> {
+    /// Canonical full set (all values for the type).
+    Top,
+    /// Canonical arc from `lo` clockwise to `hi`.
+    Arc { lo: T, hi: T },
+}
+
+// Explicit Clone implementation to satisfy Verus verification contracts
+impl<T: Copy> Clone for Wrapped<T> {
+    fn clone(&self) -> (res: Self)
+        ensures res == self
+    {
+        *self
+    }
+}
+
+/// The Sign domain parameterized by integer type to support all primitive widths.
+/// Guaranteed to be non-empty (uses AbstractValue wrapper for unreachability).
+#[derive(Copy, PartialEq, Eq)]
+pub enum Sign<T> {
+    Zero,
+    Pos,
+    Neg,
+    NonNeg,
+    NonPos,
+    NonZero,
+    /// Top state holds the PhantomData to satisfy the compiler without creating
+    /// an invalid/empty 8th enum representation.
+    Top(PhantomData<T>),
+}
+
+// Explicit Clone implementation to satisfy Verus verification contracts
+impl<T: Copy> Clone for Sign<T> {
+    fn clone(&self) -> (res: Self)
+        ensures res == self
+    {
+        *self
+    }
+}
+
+} // end verus!
+
+// The macro must live OUTSIDE the main verus! block, and generate its own verus! block 
+// inside the expansion so the Verus parser processes it correctly.
+macro_rules! impl_wrapped_domain {
+    ($ty:ty) => {
+        verus! {
+            impl Wrapped<$ty> {
+                /// Membership predicate (concretization): mathematical spec.
+                pub open spec fn has(self, x: $ty) -> bool {
+                    match self {
+                        Wrapped::Top => true,
+                        Wrapped::Arc { lo, hi } => {
+                            if lo <= hi {
+                                lo <= x && x <= hi
+                            } else {
+                                x >= lo || x <= hi
+                            }
+                        }
+                    }
+                }
+
+                /// Executable membership check that provably matches the mathematical `has` spec.
+                pub fn contains(&self, x: $ty) -> (res: bool)
+                    ensures res == self.has(x)
+                {
+                    match *self {
+                        Wrapped::Top => true,
+                        Wrapped::Arc { lo, hi } => {
+                            if lo <= hi {
+                                lo <= x && x <= hi
+                            } else {
+                                x >= lo || x <= hi
+                            }
+                        }
+                    }
+                }
+
+                /// Normalizes the representation by converting full-circle arcs to Top.
+                pub fn normalize(self) -> (res: Self)
+                    ensures
+                        forall|x: $ty| res.has(x) == self.has(x)
+                {
+                    match self {
+                        Wrapped::Arc { lo, hi } => {
+                            if lo == hi.wrapping_add(1) {
+                                Wrapped::Top
+                            } else {
+                                self
+                            }
+                        },
+                        _ => self,
+                    }
+                }
+
+                /// Constructor for a constant / singleton value.
+                pub open spec fn constant(val: $ty) -> Self {
+                    Wrapped::Arc { lo: val, hi: val }
+                }
+
+                /// Check if interval represents the full universe.
+                pub open spec fn is_top(self) -> bool {
+                    match self {
+                        Wrapped::Top => true,
+                        _ => false,
+                    }
+                }
+
+                /// Intersection (meet) of two wrapped domains.
+                pub fn meet(&self, other: &Self) -> AbstractValue<Self> {
+                    if self == other {
+                        return AbstractValue::NonBot(self.clone());
+                    }
+                    match (self, other) {
+                        (Wrapped::Top, x) | (x, Wrapped::Top) => AbstractValue::NonBot(x.clone()),
+                        (Wrapped::Arc { lo: l1, hi: h1 }, Wrapped::Arc { lo: l2, hi: h2 }) => {
+                            let self_has_l2 = self.contains(*l2);
+                            let self_has_h2 = self.contains(*h2);
+                            let other_has_l1 = other.contains(*l1);
+                            let other_has_h1 = other.contains(*h1);
+
+                            if self_has_l2 && self_has_h2 && other_has_l1 && other_has_h1 {
+                                // Two-arc split (both arcs contain each other's endpoints)
+                                // Returning `self` is a deterministic, sound over-approximation.
+                                AbstractValue::NonBot(self.clone())
+                            } else if self_has_l2 && other_has_h1 {
+                                AbstractValue::NonBot(Wrapped::Arc { lo: *l2, hi: *h1 }.normalize())
+                            } else if other_has_l1 && self_has_h2 {
+                                AbstractValue::NonBot(Wrapped::Arc { lo: *l1, hi: *h2 }.normalize())
+                            } else if self_has_l2 && self_has_h2 {
+                                AbstractValue::NonBot(other.clone())
+                            } else if other_has_l1 && other_has_h1 {
+                                AbstractValue::NonBot(self.clone())
+                            } else {
+                                // Completely disjoint
+                                AbstractValue::Bot
+                            }
+                        }
+                    }
+                }
+
+                /// Union (join) of two wrapped domains.
+                pub fn join(&self, other: &Self) -> Self {
+                    if self == other {
+                        return self.clone();
+                    }
+                    match (self, other) {
+                        (Wrapped::Top, _) | (_, Wrapped::Top) => Wrapped::Top,
+                        (Wrapped::Arc { lo: l1, hi: h1 }, Wrapped::Arc { lo: l2, hi: h2 }) => {
+                            let self_has_l2 = self.contains(*l2);
+                            let self_has_h2 = self.contains(*h2);
+                            let other_has_l1 = other.contains(*l1);
+                            let other_has_h1 = other.contains(*h1);
+
+                            if (self_has_l2 && self_has_h2) || (other_has_l1 && other_has_h1) {
+                                // One completely contains the other
+                                if self_has_l2 { self.clone() } else { other.clone() }
+                            } else if self_has_l2 {
+                                Wrapped::Arc { lo: *l1, hi: *h2 }.normalize()
+                            } else if other_has_l1 {
+                                Wrapped::Arc { lo: *l2, hi: *h1 }.normalize()
+                            } else {
+                                // Disjoint arcs: conservatively return Top to contain both arcs soundly.
+                                Wrapped::Top
+                            }
+                        }
+                    }
+                }
+            }
+        } // end inner verus!
+    }
+}
+
+// Generate implementations for all requested primitive integer types
+impl_wrapped_domain!(u8);
+impl_wrapped_domain!(u16);
+impl_wrapped_domain!(u32);
+impl_wrapped_domain!(u64);
+impl_wrapped_domain!(u128);
+impl_wrapped_domain!(i8);
+impl_wrapped_domain!(i16);
+impl_wrapped_domain!(i32);
+impl_wrapped_domain!(i64);
+impl_wrapped_domain!(i128);
+
+macro_rules! impl_sign_domain {
+    ($ty:ty) => {
+        verus! {
+            impl Sign<$ty> {
+                /// Concretization: mathematical specification of what values the sign represents.
+                pub open spec fn has(self, x: $ty) -> bool {
+                    match self {
+                        Sign::Zero => x == 0,
+                        Sign::Pos => x > 0,
+                        Sign::Neg => x < 0,
+                        Sign::NonNeg => x >= 0,
+                        Sign::NonPos => x <= 0,
+                        Sign::NonZero => x != 0,
+                        Sign::Top(_) => true,
+                    }
+                }
+
+                /// Executable membership check.
+                pub fn contains(&self, x: $ty) -> (res: bool)
+                    ensures res == self.has(x)
+                {
+                    match *self {
+                        Sign::Zero => x == 0,
+                        Sign::Pos => x > 0,
+                        Sign::Neg => x < 0,
+                        Sign::NonNeg => x >= 0,
+                        Sign::NonPos => x <= 0,
+                        Sign::NonZero => x != 0,
+                        Sign::Top(_) => true,
+                    }
+                }
+
+                /// Refinement ordering: returns true if `self` is as precise or more precise than `other`.
+                pub fn refines(&self, other: &Self) -> bool {
+                    if self == other {
+                        return true;
+                    }
+                    match (*self, *other) {
+                        (_, Sign::Top(_)) => true,
+                        (Sign::Zero, Sign::NonNeg) => true,
+                        (Sign::Zero, Sign::NonPos) => true,
+                        (Sign::Pos, Sign::NonNeg) => true,
+                        (Sign::Pos, Sign::NonZero) => true,
+                        (Sign::Neg, Sign::NonPos) => true,
+                        (Sign::Neg, Sign::NonZero) => true,
+                        _ => false,
+                    }
+                }
+
+                /// Intersection (meet) of two sign domains.
+                pub fn meet(self, other: Self) -> AbstractValue<Self> {
+                    if self == other {
+                        return AbstractValue::NonBot(self);
+                    }
+                    match (self, other) {
+                        (Sign::Top(_), x) | (x, Sign::Top(_)) => AbstractValue::NonBot(x),
+                        
+                        (Sign::Zero, Sign::NonNeg) | (Sign::NonNeg, Sign::Zero) => AbstractValue::NonBot(Sign::Zero),
+                        (Sign::Zero, Sign::NonPos) | (Sign::NonPos, Sign::Zero) => AbstractValue::NonBot(Sign::Zero),
+                        
+                        (Sign::Pos, Sign::NonNeg) | (Sign::NonNeg, Sign::Pos) => AbstractValue::NonBot(Sign::Pos),
+                        (Sign::Pos, Sign::NonZero) | (Sign::NonZero, Sign::Pos) => AbstractValue::NonBot(Sign::Pos),
+                        
+                        (Sign::Neg, Sign::NonPos) | (Sign::NonPos, Sign::Neg) => AbstractValue::NonBot(Sign::Neg),
+                        (Sign::Neg, Sign::NonZero) | (Sign::NonZero, Sign::Neg) => AbstractValue::NonBot(Sign::Neg),
+                        
+                        (Sign::NonNeg, Sign::NonPos) | (Sign::NonPos, Sign::NonNeg) => AbstractValue::NonBot(Sign::Zero),
+                        (Sign::NonNeg, Sign::NonZero) | (Sign::NonZero, Sign::NonNeg) => AbstractValue::NonBot(Sign::Pos),
+                        (Sign::NonPos, Sign::NonZero) | (Sign::NonZero, Sign::NonPos) => AbstractValue::NonBot(Sign::Neg),
+                        
+                        // All other conflicting combinations yield Bottom (empty set)
+                        _ => AbstractValue::Bot,
+                    }
+                }
+
+                /// Union (join) of two sign domains.
+                pub fn join(self, other: Self) -> Self {
+                    if self == other {
+                        return self;
+                    }
+                    match (self, other) {
+                        (Sign::Top(_), _) | (_, Sign::Top(_)) => Sign::Top(PhantomData),
+                        
+                        (Sign::Zero, Sign::Pos) | (Sign::Pos, Sign::Zero) => Sign::NonNeg,
+                        (Sign::Zero, Sign::Neg) | (Sign::Neg, Sign::Zero) => Sign::NonPos,
+                        (Sign::Zero, Sign::NonNeg) | (Sign::NonNeg, Sign::Zero) => Sign::NonNeg,
+                        (Sign::Zero, Sign::NonPos) | (Sign::NonPos, Sign::Zero) => Sign::NonPos,
+                        (Sign::Zero, Sign::NonZero) | (Sign::NonZero, Sign::Zero) => Sign::Top(PhantomData),
+
+                        (Sign::Pos, Sign::Neg) | (Sign::Neg, Sign::Pos) => Sign::NonZero,
+                        (Sign::Pos, Sign::NonNeg) | (Sign::NonNeg, Sign::Pos) => Sign::NonNeg,
+                        (Sign::Pos, Sign::NonPos) | (Sign::NonPos, Sign::Pos) => Sign::Top(PhantomData),
+                        (Sign::Pos, Sign::NonZero) | (Sign::NonZero, Sign::Pos) => Sign::NonZero,
+
+                        (Sign::Neg, Sign::NonNeg) | (Sign::NonNeg, Sign::Neg) => Sign::Top(PhantomData),
+                        (Sign::Neg, Sign::NonPos) | (Sign::NonPos, Sign::Neg) => Sign::NonPos,
+                        (Sign::Neg, Sign::NonZero) | (Sign::NonZero, Sign::Neg) => Sign::NonZero,
+
+                        (Sign::NonNeg, Sign::NonPos) | (Sign::NonPos, Sign::NonNeg) => Sign::Top(PhantomData),
+                        (Sign::NonNeg, Sign::NonZero) | (Sign::NonZero, Sign::NonNeg) => Sign::Top(PhantomData),
+                        (Sign::NonPos, Sign::NonZero) | (Sign::NonZero, Sign::NonPos) => Sign::Top(PhantomData),
+                        
+                        _ => Sign::Top(PhantomData),
+                    }
+                }
+
+                /// Unary negation of the sign domain.
+                pub fn neg(self) -> Self {
+                    match self {
+                        Sign::Zero => Sign::Zero,
+                        Sign::Pos => Sign::Neg,
+                        Sign::Neg => Sign::Pos,
+                        Sign::NonNeg => Sign::NonPos,
+                        Sign::NonPos => Sign::NonNeg,
+                        Sign::NonZero => Sign::NonZero,
+                        Sign::Top(_) => Sign::Top(PhantomData),
+                    }
+                }
+
+                /// Addition of two sign domains.
+                pub fn add(self, other: Self) -> Self {
+                    match (self, other) {
+                        (Sign::Zero, x) | (x, Sign::Zero) => x,
+                        
+                        (Sign::Pos, Sign::Pos) => Sign::Pos,
+                        (Sign::Neg, Sign::Neg) => Sign::Neg,
+                        
+                        (Sign::Pos, Sign::NonNeg) | (Sign::NonNeg, Sign::Pos) => Sign::Pos,
+                        (Sign::Neg, Sign::NonPos) | (Sign::NonPos, Sign::Neg) => Sign::Neg,
+                        
+                        (Sign::NonNeg, Sign::NonNeg) => Sign::NonNeg,
+                        (Sign::NonPos, Sign::NonPos) => Sign::NonPos,
+                        
+                        // Opposing signs or combinations involving Top/NonZero yield Top
+                        _ => Sign::Top(PhantomData),
+                    }
+                }
+
+                /// Subtraction of two sign domains.
+                pub fn sub(self, other: Self) -> Self {
+                    self.add(other.neg())
+                }
+
+                /// Multiplication of two sign domains.
+                pub fn mul(self, other: Self) -> Self {
+                    match (self, other) {
+                        (Sign::Zero, _) | (_, Sign::Zero) => Sign::Zero,
+                        
+                        (Sign::Pos, Sign::Pos) | (Sign::Neg, Sign::Neg) => Sign::Pos,
+                        (Sign::Pos, Sign::Neg) | (Sign::Neg, Sign::Pos) => Sign::Neg,
+                        
+                        (Sign::Pos, Sign::NonNeg) | (Sign::NonNeg, Sign::Pos) | 
+                        (Sign::Neg, Sign::NonPos) | (Sign::NonPos, Sign::Neg) | 
+                        (Sign::NonNeg, Sign::NonNeg) | (Sign::NonPos, Sign::NonPos) => Sign::NonNeg,
+                        
+                        (Sign::Pos, Sign::NonPos) | (Sign::NonPos, Sign::Pos) | 
+                        (Sign::Neg, Sign::NonNeg) | (Sign::NonNeg, Sign::Neg) => Sign::NonPos,
+                        
+                        (Sign::Pos, Sign::NonZero) | (Sign::NonZero, Sign::Pos) |
+                        (Sign::Neg, Sign::NonZero) | (Sign::NonZero, Sign::Neg) |
+                        (Sign::NonZero, Sign::NonZero) => Sign::NonZero,
+                        
+                        // Remaining ambiguous combinations yield Top
+                        _ => Sign::Top(PhantomData),
+                    }
+                }
+            }
+        } // end inner verus!
+    }
+}
+
+// Generate implementations for signed integer types
+impl_sign_domain!(i8);
+impl_sign_domain!(i16);
+impl_sign_domain!(i32);
+impl_sign_domain!(i64);
+impl_sign_domain!(i128);
